@@ -71,6 +71,10 @@ entity PACMAN is
 		dipsw1     : in  std_logic_vector(7 downto 0);
 		dipsw2     : in  std_logic_vector(7 downto 0);
 		--
+		dn_addr    : in  std_logic_vector(15 downto 0);
+		dn_data    : in  std_logic_vector(7 downto 0);
+		dn_wr      : in  std_logic;
+		--
 		RESET      : in  std_logic;
 		CLK        : in  std_logic;
 		ENA_6      : in  std_logic
@@ -101,6 +105,7 @@ architecture RTL of PACMAN is
 	signal cpu_data_out     : std_logic_vector(7 downto 0);
 	signal cpu_data_in      : std_logic_vector(7 downto 0);
 
+	signal r                : std_logic_vector(7 downto 0);
 	signal program_rom_dinl : std_logic_vector(7 downto 0);
 	signal program_rom_dinh : std_logic_vector(7 downto 0);
 	signal sync_bus_cs_l    : std_logic;
@@ -140,31 +145,22 @@ architecture RTL of PACMAN is
 	signal sn_we          : std_logic;
 	signal wav1,wav2,wav3 : std_logic_vector(7 downto 0);
 
-	component ym2149 is port
-	(
-		CLK 		: in std_logic;
-		CE 		: in std_logic;
-		RESET 	: in std_logic;
-		BDIR 		: in std_logic;
-		BC 		: in std_logic;
-		DI 		: in std_logic_vector(7 downto 0);
-		DO 		: out std_logic_vector(7 downto 0);
-		CHANNEL_A: out std_logic_vector(7 downto 0);
-		CHANNEL_B: out std_logic_vector(7 downto 0);
-		CHANNEL_C: out std_logic_vector(7 downto 0);
+	signal rom0_cs,rom1_cs  : std_logic;
 
-		SEL 		: in std_logic;
-		MODE 		: in std_logic;
-		IOA_in 	: in std_logic_vector(7 downto 0);
-		IOA_out	: out std_logic_vector(7 downto 0);
-
-		IOB_in 	: in std_logic_vector(7 downto 0);
-		IOB_out	: out std_logic_vector(7 downto 0)
+	type mtd_t is array(0 to 31) of std_logic_vector(3 downto 0);
+	signal picktbl: mtd_t := (
+		X"0",X"2",X"4",X"2",X"4",X"0",X"4",X"2",X"2",X"0",X"2",X"2",X"4",X"0",X"4",X"2",
+		X"2",X"2",X"4",X"0",X"4",X"2",X"4",X"0",X"0",X"4",X"0",X"4",X"4",X"2",X"4",X"2"
 	);
-	end component;
+	
+	signal mtd_addr: std_logic_vector(4 downto 0);
+	signal method  : std_logic_vector(3 downto 0);
 
 begin
-  
+
+rom0_cs <= '1' when dn_addr(15 downto 14) = "00" else '0';
+rom1_cs <= '1' when dn_addr(15 downto 14) = "01" else '0';
+
 --
 -- video timing
 --
@@ -260,7 +256,7 @@ end process;
 u_cpu : entity work.T80sed
 port map
 (
-	RESET_n => watchdog_reset_l,
+	RESET_n => watchdog_reset_l and (not reset),
 	CLK_n   => clk,
 	CLKEN   => hcnt(0) and ena_6,
 	WAIT_n  => sync_bus_wreq_l,
@@ -362,20 +358,40 @@ cpu_data_in <=	cpu_vec_reg      when (cpu_iorq_l = '0') and (cpu_m1_l = '0') els
 					dipsw2           when iodec_dipsw2_l = '0' else
 					ram_data;
 
-u_program_rom : entity work.ROM_PGM_0
+mtd_addr <= cpu_addr(9) & cpu_addr(7) & cpu_addr(5) & cpu_addr(2) & cpu_addr(0);
+method <= picktbl(to_integer(unsigned(mtd_addr))) xor ("000" & cpu_addr(11));
+
+program_rom_dinl <= (r(7)&r(6)&r(5)&r(4)&r(3)&r(2)&r(1)&r(0)) xor X"00" when method = X"0" else
+                    (r(7)&r(6)&r(5)&r(4)&r(3)&r(2)&r(1)&r(0)) xor X"28" when method = X"1" else
+                    (r(6)&r(1)&r(3)&r(2)&r(5)&r(7)&r(0)&r(4)) xor X"96" when method = X"2" else
+                    (r(6)&r(1)&r(5)&r(2)&r(3)&r(7)&r(0)&r(4)) xor X"be" when method = X"3" else
+                    (r(0)&r(3)&r(7)&r(6)&r(4)&r(2)&r(1)&r(5)) xor X"d5" when method = X"4" else
+                    (r(0)&r(3)&r(4)&r(6)&r(7)&r(2)&r(1)&r(5)) xor X"dd";
+
+u_program_rom0 : work.dpram generic map (14,8)
 port map
 (
-	CLK  => clk,
-	ADDR => cpu_addr(13 downto 0),
-	DATA => program_rom_dinl
+	clock_a   => clk,
+	wren_a    => dn_wr and rom0_cs,
+	address_a => dn_addr(13 downto 0),
+	data_a    => dn_data,
+
+	clock_b   => clk,
+	address_b => cpu_addr(13 downto 0),
+	q_b       => r
 );
 
-u_program_rom1 : entity work.ROM_PGM_1
+u_program_rom1 : work.dpram generic map (14,8)
 port map
 (
-	CLK  => clk,
-	ADDR => cpu_addr(13 downto 0),
-	DATA => program_rom_dinh
+	clock_a   => clk,
+	wren_a    => dn_wr and rom1_cs,
+	address_a => dn_addr(13 downto 0),
+	data_a    => dn_data,
+
+	clock_b   => clk,
+	address_b => cpu_addr(13 downto 0),
+	q_b       => program_rom_dinh
 );
 
 ram_cs <= '1' when cpu_addr(15 downto 12) = X"4" else '0';
@@ -433,6 +449,10 @@ port map
 	I_VBLANK  => vblank,
 	I_FLIP    => control_reg(3),
 	O_HBLANK  => O_HBLANK,
+	--
+	dn_addr   => dn_addr,
+	dn_data   => dn_data,
+	dn_wr     => dn_wr,
 	--
 	O_RED     => O_VIDEO_R,
 	O_GREEN   => O_VIDEO_G,
